@@ -1,0 +1,7 @@
+{
+  "name": "SmartWare Pro - Hệ Thống Quản Lý Kho Thông Minh",
+  "description": "Giải pháp quản lý kho tối ưu 'One-Thumb Operation' giúp tối giản quy trình nhập xuất, kiểm kho và báo cáo thông minh.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
