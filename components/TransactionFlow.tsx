@@ -17,13 +17,16 @@ import {
   Keyboard,
   ClipboardList,
   AlertCircle,
-  Key
+  Key,
+  FileText,
+  FileSpreadsheet,
+  FileSearch
 } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 import jsQR from "jsqr";
 import { Product } from '../types.ts';
 
-type Step = 'TYPE' | 'METHOD' | 'CHOICE' | 'SCAN_QR' | 'MANUAL_ENTRY' | 'AI_UPLOAD' | 'AI_REVIEW' | 'DETAILS' | 'SUCCESS';
+type Step = 'TYPE' | 'METHOD' | 'CHOICE' | 'SCAN_QR' | 'MANUAL_ENTRY' | 'AI_UPLOAD' | 'AI_CHOICE' | 'AI_REVIEW' | 'DETAILS' | 'SUCCESS';
 type TxType = 'IN' | 'OUT' | 'TRANSFER';
 
 interface AIAnalyzedItem {
@@ -39,12 +42,9 @@ interface AIAnalyzedItem {
 
 interface TransactionFlowProps {
   products: Product[];
-  onUpdateStock: (product: Product) => void;
+  onUpdateStock: (updates: Product | Product[]) => void;
   onComplete: () => void;
 }
-
-// Fixed: Removed the conflicting manual declaration of 'aistudio' on Window.
-// The environment already provides an 'AIStudio' type for 'window.aistudio'.
 
 export const TransactionFlow: React.FC<TransactionFlowProps> = ({ products, onUpdateStock, onComplete }) => {
   const [step, setStep] = useState<Step>('TYPE');
@@ -55,6 +55,7 @@ export const TransactionFlow: React.FC<TransactionFlowProps> = ({ products, onUp
   const [analyzedItems, setAnalyzedItems] = useState<AIAnalyzedItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [needsKeySelection, setNeedsKeySelection] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<{ name: string, type: string, data: string } | null>(null);
   
   const [manualForm, setManualForm] = useState<Partial<Product>>({
     sku: '',
@@ -80,7 +81,7 @@ export const TransactionFlow: React.FC<TransactionFlowProps> = ({ products, onUp
 
   const handleKeySelection = async () => {
     try {
-      // @ts-ignore - Assuming aistudio is globally available per requirements
+      // @ts-ignore
       await window.aistudio.openSelectKey();
       setNeedsKeySelection(false);
       setError(null);
@@ -180,12 +181,27 @@ export const TransactionFlow: React.FC<TransactionFlowProps> = ({ products, onUp
     setStep('SUCCESS');
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Kiểm tra API Key Selection trước khi chạy AI
-    // @ts-ignore - Assuming aistudio is globally available per requirements
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64Data = (reader.result as string).split(',')[1];
+      setSelectedFile({
+        name: file.name,
+        type: file.type || 'application/octet-stream',
+        data: base64Data
+      });
+      setStep('AI_CHOICE');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const processWithAI = async (mode: 'SMART' | 'STRICT') => {
+    if (!selectedFile) return;
+
+    // @ts-ignore
     if (window.aistudio && !(await window.aistudio.hasSelectedApiKey())) {
       // @ts-ignore
       await window.aistudio.openSelectKey();
@@ -194,73 +210,72 @@ export const TransactionFlow: React.FC<TransactionFlowProps> = ({ products, onUp
     setIsAnalyzing(true);
     setError(null);
 
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      const base64Data = (reader.result as string).split(',')[1];
-      try {
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const response = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: [{
-            parts: [
-              { text: `BẠN LÀ CHUYÊN GIA KIỂM SOÁT KHO (INVENTORY AUDITOR) VỚI ĐỘ CHÍNH XÁC 100%.
-NHIỆM VỤ: Trích xuất thông tin từ hóa đơn/phiếu nhập xuất đính kèm.
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const prompt = mode === 'SMART' 
+        ? `BẠN LÀ CHUYÊN GIA KIỂM SOÁT KHO (INVENTORY AUDITOR) THÔNG MINH.
+NHIỆM VỤ: Trích xuất và PHÂN TÍCH thông tin từ tài liệu đính kèm (có thể là ảnh, PDF, Excel hoặc Word).
+CHẾ ĐỘ: THÔNG MINH (Tự động suy luận SKU từ tên, phân loại ngành hàng, sửa lỗi đánh máy nếu mờ).
+HÃY SUY LUẬN TỪNG BƯỚC (STEP-BY-STEP REASONING) TRƯỚC KHI TRẢ VỀ JSON.`
+        : `BẠN LÀ MÁY QUÉT DỮ LIỆU CHÍNH XÁC TUYỆT ĐỐI (STRICT SCANNER).
+NHIỆM VỤ: Trích xuất DỮ LIỆU NGUYÊN BẢN từ tài liệu đính kèm.
+CHẾ ĐỘ: CHÍNH XÁC (Chỉ lấy đúng ký tự có trong file, không tự ý sửa đổi, không tự tạo SKU nếu không thấy, không suy diễn).
+Nếu một trường dữ liệu không tồn tại trong file, hãy để trống hoặc null.`;
 
-YÊU CẦU QUAN TRỌNG:
-1. Đọc kĩ từng dòng (line items).
-2. Tên sản phẩm (name): Trích xuất tên đầy đủ, không viết tắt.
-3. Số lượng (quantity): Luôn lấy số lượng thực tế của từng mã hàng.
-4. SKU: Nếu không có mã rõ ràng, hãy tạo mã dựa trên tên (VD: 'Bào Khí Khang' -> 'BKK').
-5. Lô (lot): Rất quan trọng, tìm các ký hiệu như Lot, Lô, No.
-6. Hạn dùng (expiryDate): Định dạng YYYY-MM-DD.
-
-HÃY SUY LUẬN TỪNG BƯỚC (STEP-BY-STEP REASONING) TRƯỚC KHI TRẢ VỀ JSON.` },
-              { inlineData: { data: base64Data, mimeType: file.type } }
-            ]
-          }],
-          config: {
-            thinkingConfig: { thinkingBudget: 5000 },
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  sku: { type: Type.STRING },
-                  name: { type: Type.STRING },
-                  quantity: { type: Type.NUMBER },
-                  category: { type: Type.STRING },
-                  price: { type: Type.NUMBER },
-                  cost: { type: Type.NUMBER },
-                  lot: { type: Type.STRING },
-                  expiryDate: { type: Type.STRING }
-                },
-                required: ["name", "quantity"]
-              }
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: [{
+          parts: [
+            { text: prompt + "\n\nYÊU CẦU ĐẦU RA: JSON ARRAY các đối tượng có thuộc tính: sku, name, quantity, category, price, cost, lot, expiryDate." },
+            { inlineData: { data: selectedFile.data, mimeType: selectedFile.type } }
+          ]
+        }],
+        config: {
+          thinkingConfig: { thinkingBudget: mode === 'SMART' ? 5000 : 0 },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                sku: { type: Type.STRING },
+                name: { type: Type.STRING },
+                quantity: { type: Type.NUMBER },
+                category: { type: Type.STRING },
+                price: { type: Type.NUMBER },
+                cost: { type: Type.NUMBER },
+                lot: { type: Type.STRING },
+                expiryDate: { type: Type.STRING }
+              },
+              required: ["name", "quantity"]
             }
           }
-        });
-        const result = JSON.parse(response.text || '[]');
-        if (result.length === 0) throw new Error("AI không tìm thấy sản phẩm nào trong ảnh.");
-        setAnalyzedItems(result);
-        setStep('AI_REVIEW');
-      } catch (err: any) {
-        console.error(err);
-        if (err.message?.includes("Requested entity was not found") || err.message?.includes("404")) {
-          setNeedsKeySelection(true);
-          setError("Lỗi kết nối API (NOT_FOUND). Vui lòng cấu hình lại API Key từ Project đã trả phí.");
-        } else {
-          setError("Không thể đọc được dữ liệu. Ảnh có thể bị mờ hoặc không phải hóa đơn hàng hóa.");
         }
-      } finally {
-        setIsAnalyzing(false);
+      });
+
+      const result = JSON.parse(response.text || '[]');
+      if (result.length === 0) throw new Error("Không tìm thấy dữ liệu hàng hóa hợp lệ.");
+      setAnalyzedItems(result);
+      setStep('AI_REVIEW');
+    } catch (err: any) {
+      console.error(err);
+      if (err.message?.includes("Requested entity was not found") || err.message?.includes("404")) {
+        setNeedsKeySelection(true);
+        setError("Lỗi kết nối API (NOT_FOUND). Vui lòng cấu hình lại API Key từ Project đã trả phí.");
+      } else {
+        setError("Lỗi xử lý: " + (err.message || "Không thể đọc dữ liệu từ file này."));
       }
-    };
-    reader.readAsDataURL(file);
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
+  /**
+   * CẢI TIẾN: GOM NHÓM CẬP NHẬT (BATCHING)
+   * Thu thập toàn bộ sản phẩm và chỉ gửi lên một lần duy nhất.
+   */
   const confirmAllAIItems = () => {
-      analyzedItems.forEach(item => {
+      const allUpdates: Product[] = analyzedItems.map(item => {
           const existing = products.find(p => p.sku === item.sku);
           const baseProduct = existing || {
               id: Math.random().toString(36).substr(2, 9),
@@ -276,13 +291,15 @@ HÃY SUY LUẬN TỪNG BƯỚC (STEP-BY-STEP REASONING) TRƯỚC KHI TRẢ VỀ 
           };
           
           const adjustment = txType === 'OUT' ? -item.quantity : item.quantity;
-          onUpdateStock({
+          return {
               ...baseProduct,
               quantity: Math.max(0, (baseProduct.quantity || 0) + adjustment),
               lot: item.lot || baseProduct.lot,
               expiryDate: item.expiryDate || baseProduct.expiryDate
-          });
+          };
       });
+      
+      onUpdateStock(allUpdates);
       setStep('SUCCESS');
   };
 
@@ -308,7 +325,7 @@ HÃY SUY LUẬN TỪNG BƯỚC (STEP-BY-STEP REASONING) TRƯỚC KHI TRẢ VỀ 
             </div>
             <div className="grid grid-cols-1 gap-5">
               <ActionButton icon={Scan} label="QUÉT QR / BARCODE" desc="Tự động tìm hoặc tạo mới" color="bg-blue-600" onClick={() => setStep('SCAN_QR')} />
-              <ActionButton icon={BrainCircuit} label="HÌNH ẢNH / CHỨNG TỪ" desc="Nâng cấp bộ não AI thông minh" color="bg-gradient-to-r from-purple-600 to-blue-600" onClick={() => setStep('CHOICE')} special />
+              <ActionButton icon={BrainCircuit} label="FILE / CHỨNG TỪ / ẢNH" desc="Hỗ trợ Excel, Word, PDF, Ảnh" color="bg-gradient-to-r from-purple-600 to-blue-600" onClick={() => setStep('CHOICE')} special />
               <ActionButton icon={Keyboard} label="NHẬP FORM TRỰC TIẾP" desc="Nhập liệu nhanh bằng tay" color="bg-slate-700" onClick={() => { setManualForm({...manualForm, quantity: 1}); setStep('MANUAL_ENTRY'); }} />
             </div>
           </div>
@@ -317,8 +334,8 @@ HÃY SUY LUẬN TỪNG BƯỚC (STEP-BY-STEP REASONING) TRƯỚC KHI TRẢ VỀ 
       case 'CHOICE':
         return (
           <div className="space-y-8 animate-in zoom-in duration-300 px-2 flex flex-col items-center justify-center py-10">
-            <h3 className="text-2xl font-black uppercase text-center mb-2">Xử lý dữ liệu ảnh</h3>
-            <p className="text-slate-500 font-bold text-center mb-8 px-10">AI phù hợp cho danh sách dài. Nhập tay nếu ảnh mờ hoặc chỉ có 1-2 món.</p>
+            <h3 className="text-2xl font-black uppercase text-center mb-2">Xử lý tài liệu</h3>
+            <p className="text-slate-500 font-bold text-center mb-8 px-10">Chọn 'Smart AI' cho hóa đơn phức tạp, hoặc 'Nhập tay' cho số liệu đơn lẻ.</p>
             <div className="grid grid-cols-1 gap-6 w-full max-w-sm">
               <button 
                 onClick={() => setStep('AI_UPLOAD')}
@@ -328,8 +345,8 @@ HÃY SUY LUẬN TỪNG BƯỚC (STEP-BY-STEP REASONING) TRƯỚC KHI TRẢ VỀ 
                     <BrainCircuit size={48} />
                 </div>
                 <div className="text-center">
-                  <div className="font-black text-xl uppercase tracking-tighter">AI Smart Scan V2</div>
-                  <div className="text-[10px] font-bold opacity-80 uppercase tracking-widest mt-1">Độ chính xác cao hơn</div>
+                  <div className="font-black text-xl uppercase tracking-tighter">AI Phân Tích File</div>
+                  <div className="text-[10px] font-bold opacity-80 uppercase tracking-widest mt-1">Excel, Word, PDF, Ảnh</div>
                 </div>
               </button>
               <button 
@@ -341,11 +358,131 @@ HÃY SUY LUẬN TỪNG BƯỚC (STEP-BY-STEP REASONING) TRƯỚC KHI TRẢ VỀ 
                 </div>
                 <div className="text-center text-slate-900 dark:text-white">
                   <div className="font-black text-xl uppercase tracking-tighter">Nhập Thủ Công</div>
-                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Chỉnh sửa chi tiết</div>
+                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Ghi chính xác 100%</div>
                 </div>
               </button>
             </div>
             <button onClick={() => setStep('METHOD')} className="mt-8 text-slate-400 font-black uppercase text-xs tracking-widest hover:text-blue-600 transition-colors">Quay lại</button>
+          </div>
+        );
+
+      case 'AI_UPLOAD':
+        return (
+          <div className="space-y-8 animate-in slide-in-from-right duration-300 px-2">
+            <div className="text-center">
+               <div className="w-24 h-24 bg-blue-600 rounded-[32px] mx-auto flex items-center justify-center text-white shadow-2xl mb-6">
+                  <FileUp size={48} />
+               </div>
+               <h3 className="text-3xl font-black tracking-tighter mb-2 uppercase">Tải lên tài liệu</h3>
+               <p className="text-slate-500 font-medium leading-relaxed px-6">Hệ thống hỗ trợ Ảnh hóa đơn, File PDF, Excel (.xlsx) hoặc Word (.docx).</p>
+            </div>
+            
+            <div className="relative group">
+               <input 
+                  type="file" 
+                  accept="image/*,application/pdf,.xlsx,.xls,.doc,.docx" 
+                  className="absolute inset-0 opacity-0 cursor-pointer z-10" 
+                  onChange={onFileSelected} 
+               />
+               <div className="border-4 border-dashed rounded-[48px] py-16 px-8 flex flex-col items-center justify-center gap-6 bg-white dark:bg-slate-800 border-slate-200 hover:border-blue-500 transition-all">
+                  <div className="flex gap-4">
+                     <FileSpreadsheet size={32} className="text-green-500" />
+                     <FileText size={32} className="text-blue-500" />
+                     <FileSearch size={32} className="text-purple-500" />
+                  </div>
+                  <div className="font-black text-2xl tracking-tight uppercase text-center">CHỌN FILE / ẢNH HÓA ĐƠN</div>
+               </div>
+            </div>
+
+            <button onClick={() => setStep('CHOICE')} className="w-full py-4 text-slate-400 font-black uppercase text-sm hover:text-slate-900 transition-colors">Quay lại</button>
+          </div>
+        );
+
+      case 'AI_CHOICE':
+        return (
+          <div className="space-y-8 animate-in slide-in-from-bottom duration-400 px-2">
+            <div className="bg-white dark:bg-slate-800 p-8 rounded-[40px] border-2 border-slate-100 flex items-center gap-6 shadow-xl">
+               <div className="w-20 h-20 bg-blue-50 rounded-3xl flex items-center justify-center text-blue-600"><FileText size={40} /></div>
+               <div className="flex-1 overflow-hidden">
+                  <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Tài liệu đã chọn</div>
+                  <h4 className="font-black text-lg truncate uppercase">{selectedFile?.name}</h4>
+               </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-5">
+               <button 
+                  onClick={() => processWithAI('SMART')}
+                  disabled={isAnalyzing}
+                  className="group flex items-center gap-6 p-7 bg-blue-600 text-white rounded-[40px] shadow-2xl active:scale-95 transition-all text-left"
+               >
+                  <div className="bg-white/20 w-16 h-16 rounded-2xl flex items-center justify-center shrink-0"><BrainCircuit size={32} /></div>
+                  <div>
+                     <div className="font-black text-xl uppercase tracking-tighter">AI Phân Tích Thông Minh</div>
+                     <div className="text-[10px] font-bold opacity-80 uppercase tracking-tight">Tự suy luận, phân loại & sửa lỗi</div>
+                  </div>
+                  <ChevronRight className="ml-auto opacity-40" />
+               </button>
+
+               <button 
+                  onClick={() => processWithAI('STRICT')}
+                  disabled={isAnalyzing}
+                  className="group flex items-center gap-6 p-7 bg-white dark:bg-slate-800 border-2 border-slate-100 rounded-[40px] shadow-sm active:scale-95 transition-all text-left"
+               >
+                  <div className="bg-slate-100 dark:bg-slate-700 w-16 h-16 rounded-2xl flex items-center justify-center shrink-0 text-slate-400"><FileSearch size={32} /></div>
+                  <div>
+                     <div className="font-black text-xl uppercase tracking-tighter text-slate-900 dark:text-white">Trích Xuất Nguyên Bản</div>
+                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-tight">Giữ đúng 100% nội dung gốc</div>
+                  </div>
+                  <ChevronRight className="ml-auto text-slate-200" />
+               </button>
+            </div>
+
+            {isAnalyzing && (
+              <div className="flex flex-col items-center gap-4 py-6">
+                <Loader2 className="animate-spin text-blue-600" size={48} />
+                <div className="text-xs font-black text-blue-600 animate-pulse uppercase tracking-widest">Đang xử lý dữ liệu...</div>
+              </div>
+            )}
+
+            {error && (
+                <div className="p-5 bg-red-50 text-red-600 rounded-[32px] font-bold text-sm border border-red-100 flex flex-col gap-3">
+                   <div className="flex items-center gap-2"><AlertCircle size={18}/> {error}</div>
+                   {needsKeySelection && <button onClick={handleKeySelection} className="bg-red-600 text-white py-3 rounded-2xl font-black text-xs uppercase"><Key size={14} className="inline mr-2"/> Cấu hình API</button>}
+                </div>
+            )}
+
+            {!isAnalyzing && <button onClick={() => setStep('AI_UPLOAD')} className="w-full py-4 text-slate-400 font-black uppercase text-sm">Chọn file khác</button>}
+          </div>
+        );
+
+      case 'AI_REVIEW':
+        return (
+          <div className="space-y-6 animate-in slide-in-from-bottom-12 duration-500 px-1 pb-10">
+             <div className="text-center mb-6">
+                <h3 className="text-2xl font-black uppercase tracking-tight">Kiểm tra kết quả</h3>
+                <p className="text-slate-400 font-bold text-xs uppercase tracking-widest">Vui lòng đối soát kĩ số liệu trước khi cập nhật kho</p>
+             </div>
+             <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-1 scrollbar-hide">
+                {analyzedItems.map((item, idx) => (
+                  <div key={idx} className="bg-white dark:bg-slate-800 p-6 rounded-[36px] border border-slate-100 shadow-sm relative overflow-hidden group hover:border-blue-200 transition-colors">
+                     <div className="flex justify-between items-start mb-2">
+                        <div className="flex-1">
+                           <h4 className="font-black text-lg leading-tight uppercase group-hover:text-blue-600 transition-colors">{item.name}</h4>
+                           <div className="flex flex-wrap gap-2 mt-2">
+                              <span className="text-[10px] font-black bg-blue-50 text-blue-600 px-3 py-1 rounded-lg">SKU: {item.sku || 'Auto'}</span>
+                              {item.lot && <span className="text-[10px] font-black bg-slate-900 text-white px-3 py-1 rounded-lg">LÔ: {item.lot}</span>}
+                              {item.expiryDate && <span className="text-[10px] font-black bg-orange-100 text-orange-600 px-3 py-1 rounded-lg">HẠN: {item.expiryDate}</span>}
+                           </div>
+                        </div>
+                        <div className="text-3xl font-black text-blue-600">x{item.quantity}</div>
+                     </div>
+                  </div>
+                ))}
+             </div>
+             <div className="grid grid-cols-1 gap-3">
+                <button onClick={confirmAllAIItems} className="w-full py-6 bg-blue-600 text-white rounded-[32px] font-black text-xl shadow-2xl shadow-blue-600/30 uppercase tracking-tighter active:scale-95 transition-all">Xác nhận tất cả</button>
+                <button onClick={() => setStep('AI_CHOICE')} className="w-full py-4 text-slate-400 font-black uppercase text-sm hover:text-red-500 transition-colors">Hủy & Làm lại</button>
+             </div>
           </div>
         );
 
@@ -411,16 +548,8 @@ HÃY SUY LUẬN TỪNG BƯỚC (STEP-BY-STEP REASONING) TRƯỚC KHI TRẢ VỀ 
             </div>
 
             {error && (
-                <div className="p-5 bg-red-50 text-red-600 rounded-[32px] font-bold text-sm flex flex-col gap-3 border border-red-100">
+                <div className="p-5 bg-red-50 text-red-600 rounded-[32px] font-bold text-sm border border-red-100">
                     <div className="flex items-center gap-2"><AlertCircle size={18}/> {error}</div>
-                    {needsKeySelection && (
-                        <button 
-                            onClick={handleKeySelection}
-                            className="bg-red-600 text-white py-3 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 shadow-lg shadow-red-500/20 active:scale-95 transition-all"
-                        >
-                            <Key size={14} /> Cấu hình lại API Key
-                        </button>
-                    )}
                 </div>
             )}
 
@@ -430,84 +559,6 @@ HÃY SUY LUẬN TỪNG BƯỚC (STEP-BY-STEP REASONING) TRƯỚC KHI TRẢ VỀ 
             >
               Xác nhận thực hiện
             </button>
-          </div>
-        );
-
-      case 'AI_UPLOAD':
-        return (
-          <div className="space-y-8 animate-in slide-in-from-right duration-300 px-2">
-            <div className="text-center">
-               <div className="w-24 h-24 bg-blue-600 rounded-[32px] mx-auto flex items-center justify-center text-white shadow-2xl mb-6 animate-pulse">
-                  <Sparkles size={48} />
-               </div>
-               <h3 className="text-3xl font-black tracking-tighter mb-2 uppercase">AI Smart Scan</h3>
-               <p className="text-slate-500 font-medium leading-relaxed px-6">Hệ thống AI đang được nâng cấp để đọc hóa đơn chính xác nhất.</p>
-            </div>
-            
-            {needsKeySelection ? (
-                <div className="bg-red-50 border-2 border-red-100 p-8 rounded-[48px] text-center space-y-4">
-                    <AlertCircle size={48} className="text-red-600 mx-auto" />
-                    <h4 className="font-black text-red-600 uppercase">Cần cấu hình API Key</h4>
-                    <p className="text-sm text-red-500 font-bold px-4">Lỗi NOT_FOUND xảy ra do API Key chưa được cấp quyền từ Project trả phí của Google Cloud.</p>
-                    <button 
-                        onClick={handleKeySelection}
-                        className="w-full py-5 bg-red-600 text-white rounded-[24px] font-black uppercase tracking-tighter shadow-xl shadow-red-600/20 active:scale-95 transition-all flex items-center justify-center gap-3"
-                    >
-                        <Key size={20} /> Chọn API Key Paid Project
-                    </button>
-                    <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="block text-[10px] font-black text-slate-400 underline uppercase mt-2">Xem tài liệu Billing</a>
-                </div>
-            ) : (
-                <div className="relative group">
-                   <input type="file" accept="image/*,.pdf" className="absolute inset-0 opacity-0 cursor-pointer z-10" onChange={handleFileUpload} disabled={isAnalyzing} />
-                   <div className={`border-4 border-dashed rounded-[48px] py-16 px-8 flex flex-col items-center justify-center gap-6 transition-all ${isAnalyzing ? 'bg-slate-100 dark:bg-slate-800' : 'bg-white dark:bg-slate-800 border-slate-200 hover:border-blue-500'}`}>
-                      {isAnalyzing ? (
-                        <div className="flex flex-col items-center gap-4">
-                            <Loader2 className="animate-spin text-blue-600" size={64} />
-                            <div className="text-xs font-black text-blue-600 animate-pulse uppercase tracking-widest">Đang suy luận (Reasoning)...</div>
-                        </div>
-                      ) : (
-                        <FileUp size={40} className="text-slate-400" />
-                      )}
-                      <div className="font-black text-2xl tracking-tight uppercase">{isAnalyzing ? 'ĐANG PHÂN TÍCH...' : 'CHỌN ẢNH HÓA ĐƠN'}</div>
-                   </div>
-                </div>
-            )}
-
-            {error && !needsKeySelection && <div className="p-5 bg-red-50 text-red-600 rounded-[32px] font-bold text-center border border-red-100">{error}</div>}
-            
-            <button onClick={() => setStep('CHOICE')} className="w-full py-4 text-slate-400 font-black uppercase text-sm hover:text-slate-900 transition-colors">Quay lại</button>
-          </div>
-        );
-
-      case 'AI_REVIEW':
-        return (
-          <div className="space-y-6 animate-in slide-in-from-bottom-12 duration-500 px-1 pb-10">
-             <div className="text-center mb-6">
-                <h3 className="text-2xl font-black uppercase tracking-tight">Xác nhận dữ liệu AI</h3>
-                <p className="text-slate-400 font-bold text-xs uppercase tracking-widest">Vui lòng đối soát kĩ số lượng trước khi xác nhận</p>
-             </div>
-             <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-1 scrollbar-hide">
-                {analyzedItems.map((item, idx) => (
-                  <div key={idx} className="bg-white dark:bg-slate-800 p-6 rounded-[36px] border border-slate-100 shadow-sm relative overflow-hidden group hover:border-blue-200 transition-colors">
-                     <div className="flex justify-between items-start mb-2">
-                        <div className="flex-1">
-                           <h4 className="font-black text-lg leading-tight uppercase group-hover:text-blue-600 transition-colors">{item.name}</h4>
-                           <div className="flex flex-wrap gap-2 mt-2">
-                              <span className="text-[10px] font-black bg-blue-50 text-blue-600 px-3 py-1 rounded-lg">SKU: {item.sku || 'Auto'}</span>
-                              {item.lot && <span className="text-[10px] font-black bg-slate-900 text-white px-3 py-1 rounded-lg">LÔ: {item.lot}</span>}
-                              {item.expiryDate && <span className="text-[10px] font-black bg-orange-100 text-orange-600 px-3 py-1 rounded-lg">HẠN: {item.expiryDate}</span>}
-                           </div>
-                        </div>
-                        <div className="text-3xl font-black text-blue-600">x{item.quantity}</div>
-                     </div>
-                  </div>
-                ))}
-             </div>
-             <div className="grid grid-cols-1 gap-3">
-                <button onClick={confirmAllAIItems} className="w-full py-6 bg-blue-600 text-white rounded-[32px] font-black text-xl shadow-2xl shadow-blue-600/30 uppercase tracking-tighter active:scale-95 transition-all">Xác nhận nhập kho ngay</button>
-                <button onClick={() => setStep('CHOICE')} className="w-full py-4 text-slate-400 font-black uppercase text-sm hover:text-red-500 transition-colors">Hủy & Làm lại</button>
-             </div>
           </div>
         );
 

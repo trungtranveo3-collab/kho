@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
@@ -20,6 +21,7 @@ export const Dashboard: React.FC<{ userRole: Role, products: Product[] }> = ({ u
   const totalInventoryValue = products.reduce((acc, p) => acc + (p.price * p.quantity), 0);
   const lowStockCount = products.filter(p => p.quantity < p.minStock).length;
   
+  // Hiển thị 5 sản phẩm đầu tiên (thường là những món mới nhất được Unshift vào mảng)
   const chartData = products.slice(0, 5).map(p => ({
     name: p.name.length > 10 ? p.name.substring(0, 10) + '...' : p.name,
     stock: p.quantity,
@@ -35,7 +37,7 @@ export const Dashboard: React.FC<{ userRole: Role, products: Product[] }> = ({ u
            <PackageCheck size={64} />
         </div>
         <div>
-          <h2 className="text-3xl font-black tracking-tight">KHO ĐANG TRỐNG</h2>
+          <h2 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">KHO ĐANG TRỐNG</h2>
           <p className="text-slate-500 mt-2 font-medium">Hãy bắt đầu bằng việc nhập lô hàng đầu tiên.</p>
         </div>
         <div className="bg-blue-600 text-white px-8 py-4 rounded-2xl font-black flex items-center gap-3 shadow-xl shadow-blue-500/20 active:scale-95 transition-all cursor-pointer">
@@ -91,7 +93,7 @@ export const Dashboard: React.FC<{ userRole: Role, products: Product[] }> = ({ u
         <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-700">
           <h3 className="font-bold mb-6 flex items-center gap-2 text-lg uppercase tracking-tighter">
             <TrendingUp className="text-blue-600" />
-            Tồn kho theo sản phẩm
+            Tồn kho biến động gần nhất
           </h3>
           <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
